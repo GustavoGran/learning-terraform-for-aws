@@ -38,6 +38,22 @@ Aprender sobre terraform, entender como se relaciona com a AWS e principais conc
 - Mesmo `child module` pode ser chamado múltiplas vezes com diferentes configurações
 - Chamadas podem ser de módulos presentes em sub-diretórios da raiz ou em módulos externos do **_Terraform Registry_**, conhecidos como `published modules`
 
+#### **Module Blocks**
+- Forma de chamar um `child module` dentro de um outro módulo passando valores específicos para as variáveis declaradas dentro do `child module`
+- No exemplo abaixo, um módulo no subdiretório app-cluster é chamado e é atribuído um valor à variável de input `servers`
+- O meta-argumento `source` precisa ser uma string literal, não pode ser uma expressão
+ ```
+ module "servers" {
+  source = "./app-cluster"
+
+  servers = 5
+}
+ ```
+
+- Meta-argumentos: `source, version, count, for_each, providers, depends_on`
+- O `source` pode ser especificado localmente ou em diversos serviços de hospedagem (Github, S3, Bitbucket, Terraform Registry, HTTP URLs, etc...)
+- No `Local Path`, use e abuse de referências parciais como `./` e `../`
+
 ### **Terraform Registry**
 - Uma espécie de repositório remoto de módulos, assim como um github, dockerhub ou flathub
 - Para que um módulo seja publicado precisa atender a uma série de pré-requisitos
@@ -150,9 +166,188 @@ data "aws_ami" "web" {
 ```
 
 ### **Variables**
+- Parâmetros de configuração de `modules` sem alterar o source code
+- Variáveis declaradas no `root module` podem ter seu valor `set` na chamada do `terraform CLI` ou por meio de `environment variables`
+    - Exemplo clássico dessa propriedade pode ser observado na autenticação do terraform no provider AWS
+- Variáveis delcaradas em `child modules` tem seu valor especificado no `module block`
 
+#### **Variable Declaration**
+A declaração de variáveis em um módulo ocorre a partir de um bloco `variable` com um identificador de nome de variável. Cada nome de variável deverá ser único dentro de um mesmo módulo. Exemplo abaixo:
 
-### **Outputs**
+```
+variable "env" {
+    type = string
+    default = "dev"
+    sensitive = false
+    description = "Environment variable relating to infrastructure code. Can be prod, dev or stg"
+    validation {
+        condition = contains(["prod","stg","dev"], var.env)
+        error_message = "env = ${var.env} is not a valid input. env must be one of the following: prod, stg, dev"
+    }
+}
+```
+
+#### **Variable Block Arguments**
+Há 5 possíveis argumentos dentro do bloco variable:
+- **type**: Composição de um construtor [list(<TYPE>), set(<TYPE>), map(<TYPE>), tuple([<TYPE>,...]), object({<ATTR NAME> = <TYPE>, ...})] e de um tipo [string, number, bool] 
+- **default**: Valor padrão atribuído a variável caso não seja especificada. Ter o atributo default torna a variável opcional
+- **sensitive**: Quando setada como `true` limita o output dos comandos `terraform plan` e `terraform apply`
+- **description**: Descrição usada para documentação
+- **validation**: Bloco de regras adicionais ao type para validação do valor definido nas variáveis. Possui argumentos `condition <bool>` e `error_message <string>`
+
+#### **Assigning values to root module variables**
+Há 4 formas possíveis de atribuir valores para variáveis do root module
+
+**1. Terraform Cloud workspace**
+
+**2. Parâmetro `-var` no terraform CLI**
+    ```
+    terraform apply -var="image_id=ami-abc123"
+    terraform apply -var='image_id_list=["ami-abc123","ami-def456"]' -var="instance_type=t2.micro"
+    terraform apply -var='image_id_map={"us-east-1":"ami-abc123","us-east-2":"ami-def456"}'
+    ```
+
+**3. Arquivos de definição de variáveis `.tfvars` ou `.tfvars.json`**
+
+    Um arquivo específico pode ser especificado pelo terraform CLI
+    ```
+    terraform apply -var-file="testing.tfvars"
+    ```
+
+    Caso as variáveis não sejam especificadas, o terraform, por padrão, procurará na raiz do repositório:  
+        - arquivos nomeados exatamente como `terraform.tfvars` ou `terraform.tfvars.json`
+        - arquivos com os sufixos `.auto.tfvars` ou `.auto.tfvars.json`
+    
+    Exemplo de formatação dos arquivos:
+    ```
+    $ cat terraform.tfvars
+    image_id = "ami-abc123"
+    availability_zone_names = [
+    "us-east-1a",
+    "us-west-1c",
+    ]
+
+    $ cat terraform.tfvars.json
+    {
+        "image_id": "ami-abc123",
+        "availability_zone_names": ["us-west-1a", "us-west-1c"]
+    }
+    ```
+**4. Variáveis de ambiente**
+
+    Para que o terraform reconheça configurações de variáveis como variáveis de ambientes, será necessário definí-las com o prefixo `TF_VAR_`
+    ```
+    $ export TF_VAR_image_id=ami-abc123
+    $ terraform plan
+    ...
+    ```
+
+Ordem de carregamento de variáveis, as últimas possuem prioridade com relação às primeiras:
+1. Environment variables
+2. The terraform.tfvars file, if present.
+3. The terraform.tfvars.json file, if present.
+4. Any *.auto.tfvars or *.auto.tfvars.json files, processed in lexical order of their filenames.
+5. Any -var and -var-file options on the command line, in the order they are provided. (This includes variables set by a Terraform Cloud workspace.)
+
+#### **Assigning values to child module variables**
+
+### **Local Values**
+- Muito parecidas com variáveis, porém estão contidas somente dentro do módulo ao qual são definidas, como uma espécie de variáveis temporárias definidas dentro do escopo de uma função
+- Não possuem acesso de input / output externo
+- Útil quando um mesmo valor é usado múltiplas vezes dentro do módulo e pode ser alterado no futuro
+- Suportarm a definição de um nome único e atribuição de uma expressão a ela, conforme exemplo abaixo
+
+```
+locals {
+  service_name = "forum"
+  owner        = "Community Team"
+}
+
+locals {
+  # Common tags to be assigned to all resources
+  common_tags = {
+    Service = local.service_name
+    Owner   = local.owner
+  }
+}
+
+resource "aws_instance" "example" {
+  # ...
+
+  tags = local.common_tags
+}
+```
+
+### **Outputs Values**
+- Funciona como o `return`de uma função
+- Um `child module` pode usar output values para expor variáveis para o uso pelo `parent module`
+- Um `root module` pode usar output values como mensagens de retorno ao CLI depois de rodar `terraform apply`
+
+Cada output individual recebe um bloco `output` com um argumento `value` obrigatório e argumentos opcionais `description`,`sensitive`,`depends_on`
+```
+output "instance_ip_addr" {
+    value = aws_instance.server.private_ip
+    description = "The private IP address of the main server instance."
+}
+
+output "db_password" {
+  value       = aws_db_instance.db.password
+  description = "The password for logging in to the database."
+  sensitive   = true
+}
+```
+
+Para acessar os valores exportados de `child modules`no `parent module`, basta usar a expressão `module.<MODULE NAME>.<OUTPUT NAME>`. O exemplo abaixo mostra como acessar:
+```
+# main.tf
+
+module "foo" {
+  source = "./mod"
+}
+
+resource "test_instance" "x" {
+  some_attribute = module.mod.a # resource attribute references a sensitive output
+}
+
+output "out" {
+  value     = "xyz"
+  sensitive = true
+}
+
+# mod/main.tf, our module containing a sensitive output
+
+output "a" {
+  value     = "secret"
+  sensitive = true
+}
+```
+
+## **Bloco Terraform**
+- Usado para configurações gerais do terraform
+- Especifica o backend, required_providers e uma versão específica do terraform para uso
+- `backend` é um argumento do tipo bloco que especifica onde as operações do terraform serão processadas
+- `required_providers` é usado para especificar o provider da cloud
+- `required_versions` é um argumento string que especifica a versão do terraform para rodar os arquivos de configuração
+
+```
+# main.tf
+terraform {
+  required_providers {
+    aws = {
+      version = ">= 2.7.0"
+      source = "hashicorp/aws"
+    }
+  }
+}
+```
+
+## **Terraform Backend**
+- Onde as operações são processadas e os `states` snapshots são salvos
+- Remote backend é uma ferramenta muito útil para não compartilhar informações sensíveis em repositórios públicos e privados por meio do arquivo de `states` do terraform
+- Remote backend evita também que versões diferentes do arquivo states rodem na máquina de diferentes pessoas  
+
+## **Terraform States**
+
 
 # **Configurações gerais para usar AWS com Terraform**
 
