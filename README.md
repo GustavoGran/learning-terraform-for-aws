@@ -470,7 +470,6 @@ provider "aws" {
     profile = "prod"
     shared_credentials_file = "./creds_folder/creds"
 }
-
 ```
 
 ### **Meta-argumento `alias`**
@@ -498,6 +497,5 @@ resource "aws_s3_bucket" "west-bucket" {
 resource "aws_s3_bucket" "east-bucket" {
     provider = aws.east
     ...
-}
 }
 ```
